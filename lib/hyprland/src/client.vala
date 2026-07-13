@@ -35,7 +35,7 @@ public class Client : Object {
     internal void sync(Json.Object obj) {
         var hyprland = Hyprland.get_default();
 
-        address = obj.get_string_member("address").replace("0x", "");
+        address = Hyprland.normalize_address(obj.get_string_member("address"));
         mapped = obj.get_boolean_member("mapped");
         hidden = obj.get_boolean_member("hidden");
         floating = obj.get_boolean_member("floating");

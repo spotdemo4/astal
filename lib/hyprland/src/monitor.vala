@@ -90,5 +90,5 @@ public class AstalHyprland.Monitor : Object {
         FLIPPED_ROTATE_180_DEG = 6,
         /** flip and rotate by 270° */
         FLIPPED_ROTATE_270_DEG = 7,
-    }
+}
 }

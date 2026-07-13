@@ -43,7 +43,7 @@ await suppress(import("gi://AstalHyprland"), ({ Client, Group, Hyprland, Monitor
     patch(Hyprland.prototype, "clients")
     patch(Hyprland.prototype, "groups")
     patch(Client.prototype, "grouped")
-    patch(Group.prototype, "clients")
+    if (Group) patch(Group.prototype, "clients")
     patch(Monitor.prototype, "availableModes")
     patch(Monitor.prototype, "available_modes")
     patch(Workspace.prototype, "clients")

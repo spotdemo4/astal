@@ -74,20 +74,25 @@ WORKSPACES = [
 ]
 
 
-def response(request, provider, updated):
+def response(request, provider, state):
     if request == "j/monitors":
         return json.dumps(MONITORS)
     if request == "j/workspaces":
         return json.dumps(WORKSPACES)
     if request == "j/clients":
-        clients = (
-            [client("aaa", [], True), client("bbb", ["bbb"], False)]
-            if updated
-            else [
+        if state == "initial":
+            clients = [
                 client("aaa", ["aaa", "bbb"], True),
                 client("bbb", ["aaa", "bbb"], False),
             ]
-        )
+        elif state == "opened":
+            clients = [
+                client("aaa", [], True),
+                client("bbb", ["bbb", "ccc"], False),
+                client("ccc", ["bbb", "ccc"], True),
+            ]
+        else:
+            clients = [client("aaa", [], True), client("bbb", ["bbb"], False)]
         return json.dumps(clients)
     if request == "j/activeworkspace":
         return json.dumps({"id": 1, "name": "1"})
@@ -145,7 +150,7 @@ def main():
         process = subprocess.Popen([executable, provider], env=env)
         events, _ = event_socket.accept()
         requests = []
-        updated = False
+        state = "initial"
         request_socket.settimeout(0.1)
 
         while process.poll() is None:
@@ -157,10 +162,19 @@ def main():
                 request = connection.recv(65536).decode()
                 requests.append(request)
                 if request == "test/update":
-                    updated = True
-                connection.sendall(response(request, provider, updated).encode())
-            if request == "test/update":
-                events.sendall(b"moveoutofgroup>>aaa\n")
+                    state = "updated"
+                elif request == "test/open":
+                    state = "opened"
+                elif request == "test/close":
+                    state = "closed"
+                connection.sendall(response(request, provider, state).encode())
+            event = {
+                "test/update": b"moveoutofgroup>>aaa\n",
+                "test/open": b"openwindow>>ccc,1,fixture,ccc\n",
+                "test/close": b"closewindow>>ccc\n",
+            }.get(request)
+            if event:
+                events.sendall(event)
 
         events.close()
         if process.wait() != 0:
