@@ -36,14 +36,18 @@ await suppress(import("gi://AstalBluetooth"), ({ Adapter, Bluetooth, Device }) =
     patch(Device.prototype, "uuids")
 })
 
-await suppress(import("gi://AstalHyprland"), ({ Hyprland, Monitor, Workspace }) => {
+await suppress(import("gi://AstalHyprland"), ({ Client, Group, Hyprland, Monitor, Workspace }) => {
     patch(Hyprland.prototype, "binds")
     patch(Hyprland.prototype, "monitors")
     patch(Hyprland.prototype, "workspaces")
     patch(Hyprland.prototype, "clients")
+    patch(Hyprland.prototype, "groups")
+    patch(Client.prototype, "grouped")
+    patch(Group.prototype, "clients")
     patch(Monitor.prototype, "availableModes")
     patch(Monitor.prototype, "available_modes")
     patch(Workspace.prototype, "clients")
+    patch(Workspace.prototype, "groups")
 })
 
 await suppress(import("gi://AstalMpris"), ({ Mpris, Player }) => {
