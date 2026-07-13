@@ -56,6 +56,50 @@ foreach (var client in hyprland.clients) {
 
 :::
 
+## Dispatchers
+
+The typed actions on `Client`, `Workspace`, `Monitor`, and `Hyprland` detect
+whether the running compositor uses Lua or hyprlang and select the matching
+dispatcher syntax automatically.
+
+Complete Lua dispatcher expressions can also be sent directly:
+
+```js
+hyprland.dispatch_lua('hl.dsp.focus({ workspace = 3 })')
+```
+
+The existing `dispatch(name, args)` method remains available for legacy
+hyprlang dispatchers.
+
+## Groups
+
+Groups are available from `hyprland.groups`, `workspace.groups`, and
+`client.group`. Client addresses in `client.grouped` do not include the `0x`
+prefix.
+
+:::code-group
+
+```js [<i class="devicon-javascript-plain"></i> JavaScript]
+for (const group of hyprland.get_groups()) {
+    for (const client of group.get_clients())
+        print(client.title)
+}
+```
+
+```lua [<i class="devicon-lua-plain"></i> Lua]
+for _, group in ipairs(hyprland.groups) do
+    for _, client in ipairs(group.clients) do
+        print(client.title)
+    end
+end
+```
+
+:::
+
+Some Hyprland versions do not emit the documented event when a single-window
+group is created or destroyed. Call `sync_groups` when an immediate refresh is
+required after an external group toggle.
+
 ## Installation
 
 1. install dependencies
