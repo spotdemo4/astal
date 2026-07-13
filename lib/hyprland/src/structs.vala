@@ -45,4 +45,11 @@ public class Position : Object {
         y = int.parse(xy[1].strip());
     }
 }
+
+/** The parser and dispatcher syntax used by the running Hyprland instance. */
+public enum ConfigProvider {
+    UNKNOWN,
+    LUA,
+    HYPRLANG,
+}
 }

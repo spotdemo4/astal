@@ -10,6 +10,8 @@ public class Client : Object {
     public int y { get; private set; }
     public int width { get; private set; }
     public int height { get; private set; }
+    /** The group this client belongs to, or null when it is not grouped. */
+    public Group? group { get; private set; }
     public Workspace workspace { get; private set; }
     public bool floating { get; private set; }
     public Monitor monitor { get; private set; }
@@ -20,11 +22,13 @@ public class Client : Object {
     public uint pid { get; private set; }
     public bool xwayland { get; private set; }
     public bool pinned { get; private set; }
+    public bool visible { get; private set; }
     public Fullscreen fullscreen { get; private set; }
     public Fullscreen fullscreen_client { get; private set; }
 
-    // TODO: public Group[] grouped { get; private set; }
     // TODO: public Tag[] tags { get; private set; }
+    /** Normalized addresses of every client in this client's group. */
+    public string[] grouped { get; private set; default = {}; }
     public string swallowing { get; private set; }
     public int focus_history_id { get; private set; }
 
@@ -42,6 +46,7 @@ public class Client : Object {
         pid = (uint)obj.get_int_member("pid");
         xwayland = obj.get_boolean_member("xwayland");
         pinned = obj.get_boolean_member("pinned");
+        visible = (obj.get_member("visible") ? .get_boolean()) ?? !hidden;
         swallowing = obj.get_string_member("swallowing");
         focus_history_id = (int)obj.get_int_member("focusHistoryID");
         x = (int)obj.get_array_member("at").get_int_element(0);
@@ -51,25 +56,51 @@ public class Client : Object {
         fullscreen = (Fullscreen)obj.get_int_member("fullscreen");
         fullscreen_client = (Fullscreen)obj.get_int_member("fullscreenClient");
 
+        string[] addresses = {};
+        foreach (var addr in obj.get_array_member("grouped").get_elements()) {
+            addresses += Hyprland.normalize_address(addr.get_string());
+        }
+        grouped = addresses;
+
         workspace = hyprland.get_workspace((int)obj.get_object_member("workspace").get_int_member("id"));
         monitor = hyprland.get_monitor((int)obj.get_int_member("monitor"));
     }
 
+    internal void update_group(Group? group) {
+        this.group = group;
+    }
+
     public void kill() {
-        Hyprland.get_default().dispatch("closewindow", @"address:0x$address");
+        Hyprland.get_default().dispatch_action(
+            "closewindow",
+            @"address:0x$address",
+            "hl.dsp.window.close({ window = \"address:0x%s\" })".printf(address)
+        );
     }
 
     public void focus() {
-        Hyprland.get_default().dispatch("focuswindow", @"address:0x$address");
+        Hyprland.get_default().dispatch_action(
+            "focuswindow",
+            @"address:0x$address",
+            "hl.dsp.focus({ window = \"address:0x%s\" })".printf(address)
+        );
     }
 
     public void move_to(Workspace ws) {
         var id = ws.id;
-        Hyprland.get_default().dispatch("movetoworkspacesilent", @"$id,address:0x$address");
+        Hyprland.get_default().dispatch_action(
+            "movetoworkspacesilent",
+            @"$id,address:0x$address",
+            "hl.dsp.window.move({ window = \"address:0x%s\", workspace = %d, follow = false })".printf(address, id)
+        );
     }
 
     public void toggle_floating() {
-        Hyprland.get_default().dispatch("togglefloating", @"address:0x$address");
+        Hyprland.get_default().dispatch_action(
+            "togglefloating",
+            @"address:0x$address",
+            "hl.dsp.window.float({ window = \"address:0x%s\" })".printf(address)
+        );
     }
 }
 

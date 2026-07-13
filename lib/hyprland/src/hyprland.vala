@@ -42,9 +42,25 @@ public class Hyprland : Object {
     private HashTable<string, Client> _clients =
         new HashTable<string, Client>(str_hash, str_equal);
 
+    private List<Group> _groups = new List<Group>();
+    private HashTable<string, Group> _group_by_client =
+        new HashTable<string, Group>(str_hash, str_equal);
+
     public List<weak Monitor> monitors { owned get { return _monitors.get_values(); } }
     public List<weak Workspace> workspaces { owned get { return _workspaces.get_values(); } }
     public List<weak Client> clients { owned get { return _clients.get_values(); } }
+    /** Currently known window groups. */
+    public List<weak Group> groups {
+        owned get {
+            var groups = new List<weak Group>();
+            foreach (var group in _groups) {
+                groups.append(group);
+            }
+            return groups;
+        }
+    }
+    /** The config provider that determines which dispatcher syntax Hyprland accepts. */
+    public ConfigProvider config_provider { get; private set; default = ConfigProvider.UNKNOWN; }
 
     public Monitor get_monitor(int id) {
         return _monitors.get(id);
@@ -53,11 +69,18 @@ public class Hyprland : Object {
         return _workspaces.get(id);
     }
     public Client? get_client(string address) {
-        if ((address == "") || (address == null)) return null;
+        var normalized = normalize_address(address);
+        return normalized == "" ? null : _clients.get(normalized);
+    }
 
-        if (address.substring(0, 2) == "0x") return _clients.get(address.substring(2, -1));
+    internal static string normalize_address(string? address) {
+        if (address == null) return "";
+        return address.has_prefix("0x") ? address.substring(2) : address;
+    }
 
-        return _clients.get(address);
+    public Group? get_group(string? address) {
+        var normalized = normalize_address(address);
+        return normalized == "" ? null : _group_by_client.get(normalized);
     }
 
     public Monitor? get_monitor_by_name(string name) {
@@ -76,7 +99,10 @@ public class Hyprland : Object {
 
     public Workspace focused_workspace { get; private set; }
     public Monitor focused_monitor { get; private set; }
-    public Client focused_client { get; private set; }
+    public Client? focused_client { get; private set; }
+    public Group? focused_group {
+        get { return focused_client == null ? null : focused_client.group; }
+    }
 
     // other props
     public List<Bind> binds {
@@ -117,6 +143,12 @@ public class Hyprland : Object {
     // state
     public signal void client_added(Client client);
     public signal void client_removed(string address);
+    public signal void group_added(Group group);
+    public signal void group_removed(Group group);
+    public signal void client_added_to_group(Client client, Group group);
+    public signal void client_removed_from_group(Client client, Group group);
+    public signal void ignoring_group_lock(bool state);
+    public signal void locking_groups(bool state);
     public signal void workspace_added(Workspace workspace);
     public signal void workspace_removed(int id);
     public signal void monitor_added(Monitor monitor);
@@ -144,8 +176,8 @@ public class Hyprland : Object {
                         } catch (Error err) {
                             critical(err.message);
                         }
+                        watch_socket(stream);
                     });
-                    watch_socket(stream);
                 } catch (Error err) {
                     critical(err.message);
                 }
@@ -199,16 +231,74 @@ public class Hyprland : Object {
         return "";
     }
 
-    public void dispatch(string dispatcher, string args) {
-        var msg = "dispatch " + dispatcher + " " + args;
+    private void send_dispatch(string msg) {
         message_async.begin(msg, (_, res) => {
                 var err = message_async.end(res);
                 if (err != "ok") critical("dispatch error: %s", err);
             });
     }
 
+    /**
+     * Dispatch a legacy hyprlang action.
+     */
+    public void dispatch(string dispatcher, string args) {
+        send_dispatch("dispatch " + dispatcher + " " + args);
+    }
+
+    /**
+     * Dispatch a complete Lua dispatcher expression, such as
+     * `hl.dsp.focus({ workspace = 1 })`.
+     */
+    public void dispatch_lua(string expression) {
+        send_dispatch("dispatch " + expression);
+    }
+
+    internal void dispatch_action(string legacy_dispatcher, string legacy_args, string lua_expression) {
+        if (config_provider == ConfigProvider.UNKNOWN) sync_config_provider();
+
+        if (config_provider == ConfigProvider.LUA) {
+            dispatch_lua(lua_expression);
+        } else if (config_provider == ConfigProvider.HYPRLANG) {
+            dispatch(legacy_dispatcher, legacy_args);
+        } else {
+            critical("could not determine the Hyprland config provider");
+        }
+    }
+
     public void move_cursor(int x, int y) {
-        dispatch("movecursor", x.to_string() + " " + y.to_string());
+        dispatch_action(
+            "movecursor",
+            x.to_string() + " " + y.to_string(),
+            "hl.dsp.cursor.move({ x = %d, y = %d })".printf(x, y)
+        );
+    }
+
+    private void sync_config_provider() {
+        var status = message("j/status");
+        try {
+            var provider = Json.from_string(status).get_object().get_string_member("configProvider");
+            switch (provider) {
+                case "lua" :
+                        config_provider = ConfigProvider.LUA;
+                    break;
+                case "hyprlang" :
+                        case "legacy" :
+                                config_provider = ConfigProvider.HYPRLANG;
+                            break;
+                            default :
+                                config_provider = ConfigProvider.UNKNOWN;
+                            warning("unknown Hyprland config provider: %s", provider);
+                            break;
+            }
+        } catch (Error err) {
+            if (status.down().contains("unknown")) {
+                // The status request predates the Lua config provider.
+                config_provider = ConfigProvider.HYPRLANG;
+            } else {
+                config_provider = ConfigProvider.UNKNOWN;
+                warning("could not determine Hyprland config provider: %s", err.message);
+            }
+        }
     }
 
     // TODO: nag vaxry to make socket events and hyprctl more consistent
@@ -216,6 +306,7 @@ public class Hyprland : Object {
         var mons = Json.from_string(message("j/monitors")).get_array();
         var wrkspcs = Json.from_string(message("j/workspaces")).get_array();
         var clnts = Json.from_string(message("j/clients")).get_array();
+        sync_config_provider();
 
         // create
         foreach (var mon in mons.get_elements()) {
@@ -239,6 +330,7 @@ public class Hyprland : Object {
             var addr = c.get_object().get_member("address").get_string();
             get_client(addr).sync(c.get_object());
         }
+        reconcile_groups(false);
         foreach (var ws in wrkspcs.get_elements()) {
             var id = (int)ws.get_object().get_member("id").get_int();
             get_workspace(id).sync(ws.get_object());
@@ -286,6 +378,121 @@ public class Hyprland : Object {
         }
     }
 
+    private bool contains_group(List<Group> groups, Group group) {
+        foreach (var candidate in groups) {
+            if (candidate == group) return true;
+        }
+        return false;
+    }
+
+    private HashTable<string, List<string>> collect_group_memberships() {
+        var memberships = new HashTable<string, List<string>>(str_hash, str_equal);
+        foreach (var client in clients) {
+            if (client.grouped.length == 0) continue;
+
+            var key = client.grouped[0];
+            if (memberships.contains(key)) continue;
+
+            var addresses = new List<string>();
+            foreach (var address in client.grouped) {
+                addresses.append(address);
+            }
+            memberships.set(key, (owned)addresses);
+        }
+        return memberships;
+    }
+
+    private void reconcile_groups(bool emit_signals) {
+        var previous_focused_group = focused_group;
+        var previous_groups = new List<Group>();
+        var remaining_groups = new List<Group>();
+        foreach (var group in _groups) {
+            previous_groups.append(group);
+            remaining_groups.append(group);
+        }
+        var previous_membership = new HashTable<string, Group>(str_hash, str_equal);
+        foreach (var client in clients) {
+            if (client.group != null) previous_membership.set(client.address, client.group);
+        }
+
+        var next_groups = new List<Group>();
+        var memberships = collect_group_memberships();
+        foreach (var addresses in memberships.get_values()) {
+            Group? group = null;
+            var best_overlap = 0;
+            foreach (var candidate in remaining_groups) {
+                var overlap = candidate.overlap(addresses);
+                if (overlap > best_overlap) {
+                    group = candidate;
+                    best_overlap = overlap;
+                }
+            }
+
+            if (group == null) {
+                group = new Group();
+            } else {
+                remaining_groups.remove(group);
+            }
+
+            var group_clients = new List<weak Client>();
+            foreach (var address in addresses) {
+                var client = get_client(address);
+                if (client != null) group_clients.append(client);
+            }
+            if (group_clients.length() == 0) continue;
+
+            group.sync(group_clients);
+            next_groups.append(group);
+        }
+
+        var groups_changed = previous_groups.length() != next_groups.length();
+        if (!groups_changed) {
+            foreach (var group in previous_groups) {
+                if (!contains_group(next_groups, group)) {
+                    groups_changed = true;
+                    break;
+                }
+            }
+        }
+
+        _groups = (owned)next_groups;
+        _group_by_client.remove_all();
+        foreach (var group in _groups) {
+            foreach (var client in group.clients) {
+                _group_by_client.set(client.address, group);
+            }
+        }
+
+        foreach (var client in clients) {
+            client.update_group(_group_by_client.get(client.address));
+        }
+        foreach (var workspace in workspaces) {
+            workspace.sync_groups();
+        }
+
+        if (emit_signals) {
+            foreach (var group in _groups) {
+                if (!contains_group(previous_groups, group)) group_added(group);
+            }
+            foreach (var client in clients) {
+                var previous = previous_membership.get(client.address);
+                var current = client.group;
+                if (previous == current) continue;
+                if (previous != null) client_removed_from_group(client, previous);
+                if (current != null) client_added_to_group(client, current);
+            }
+            foreach (var group in previous_groups) {
+                if (!contains_group(_groups, group)) {
+                    group.destroyed();
+                    group_removed(group);
+                }
+            }
+        }
+
+        if (groups_changed) notify_property("groups");
+        if (previous_focused_group != focused_group) notify_property("focused-group");
+    }
+
     public async void sync_clients() throws Error {
         var str = yield message_async("j/clients");
         var arr = Json.from_string(str).get_array();
@@ -294,15 +501,28 @@ public class Hyprland : Object {
             var c = get_client(addr);
             if (c != null) c.sync(obj.get_object());
         }
+        reconcile_groups(true);
+    }
+
+    /**
+     * Refresh group state explicitly.
+     *
+     * This is useful because some Hyprland versions do not emit a socket event
+     * when a single-window group is created or destroyed.
+     */
+    public async void sync_groups() throws Error {
+        yield sync_clients();
+        yield sync_workspaces();
     }
 
     private async bool try_add_client(string addr) throws Error {
-        if ((addr == "") || (get_client(addr) != null)) {
+        var address = normalize_address(addr);
+        if ((address == "") || (get_client(address) != null)) {
             return true;
         }
 
         var client = new Client();
-        _clients.insert(addr, client);
+        _clients.insert(address, client);
         yield sync_clients();
         yield sync_workspaces();
         client_added(client);
@@ -314,145 +534,160 @@ public class Hyprland : Object {
         var args = line.split(">>");
 
         switch (args[0]) {
-            case "workspacev2": {
-                yield sync_workspaces();
-                yield sync_monitors();
-                focused_workspace = get_workspace(int.parse(args[1]));
-                break;
-            }
-            case "focusedmon": {
-                var argv = args[1].split(",", 2);
-                yield sync_monitors();
-                focused_monitor = get_monitor_by_name(argv[0]);
-                focused_workspace = get_workspace_by_name(argv[1]);
-                break;
-            }
-            case "fullscreen": {
-                yield sync_clients();
-                break;
-            }
-            case "monitorremoved": {
-                var id = get_monitor_by_name(args[1]).id;
-                _monitors.get(id).removed();
-                _monitors.remove(id);
-                monitor_removed(id);
-                notify_property("monitors");
-                break;
-            }
-            case "monitoraddedv2": {
-                var id = int.parse(args[1].split(",", 2)[0]);
-                var mon = new Monitor();
-                _monitors.insert(id, mon);
-                yield sync_monitors();
-                monitor_added(mon);
-                notify_property("monitors");
-                break;
-            }
-            case "createworkspacev2": {
-                var id = int.parse(args[1].split(",", 2)[0]);
-                var ws = new Workspace();
-                _workspaces.insert(id, ws);
-                yield sync_workspaces();
-                workspace_added(ws);
-                notify_property("workspaces");
-                break;
-            }
-            case "destroyworkspacev2": {
-                var id = int.parse(args[1].split(",", 2)[0]);
-                _workspaces.get(id).removed();
-                _workspaces.remove(id);
-                workspace_removed(id);
-                notify_property("workspaces");
-                break;
-            }
-            case "moveworkspacev2": {
-                yield sync_workspaces();
-                yield sync_monitors();
-                focused_workspace = get_workspace(int.parse(args[1]));
-                notify_property("workspaces");
-                break;
-            }
-            case "renameworkspace": {
-                yield sync_workspaces();
-                break;
-            }
-            case "activespecial": {
-                yield sync_monitors();
-                yield sync_workspaces();
-                break;
-            }
-            case "activelayout": {
-                var argv = args[1].split(",");
-                keyboard_layout(argv[0], argv[1]);
-                break;
-            }
-            // first event that signals a new client when it opens as an active window
-            case "activewindowv2": {
-                yield try_add_client(args[1]);
-                focused_client = get_client(args[1]);
-                break;
-            }
-            case "openwindow": {
-                var addr = args[1].split(",")[0];
-                if (yield try_add_client(addr)) {
-                    yield sync_clients();
-                    yield sync_workspaces();
-                }
-                break;
-            }
-            case "closewindow": {
-                _clients.get(args[1]).removed();
-                _clients.remove(args[1]);
-                yield sync_workspaces();
-                client_removed(args[1]);
-                notify_property("clients");
-                break;
-            }
-            case "movewindowv2": {
-                yield sync_clients();
-                yield sync_workspaces();
-                var argv = args[1].split(",");
-                client_moved(get_client(argv[0]), get_workspace(int.parse(argv[1])));
-                get_client(argv[0]).moved_to(get_workspace(int.parse(argv[1])));
-                break;
-            }
-            case "submap": {
-                submap(args[1]);
-                break;
-            }
-            case "changefloatingmode": {
-                var argv = args[1].split(",");
-                yield sync_clients();
-                floating(get_client(argv[0]), argv[1] == "0");
-                break;
-            }
-            case "urgent": {
-                urgent(get_client(args[1]));
-                break;
-            }
-            case "minimize": {
-                var argv = args[1].split(",");
-                yield sync_clients();
-                minimize(get_client(argv[0]), argv[1] == "0");
-                break;
-            }
-            case "windowtitlev2": {
-                yield sync_clients();
-                break;
-            }
-            // TODO:
-            case "togglegroup":
-            case "moveintogroup":
-            case "moveoutofgroup":
-            case "ignoregrouplock":
-            case "lockgroups": {
-                break;
-            }
-            case "configreloaded": {
-                config_reloaded();
-                break;
-            }
-            default: break;
+            case "workspacev2" : {
+                        yield sync_workspaces();
+                        yield sync_monitors();
+                        focused_workspace = get_workspace(int.parse(args[1]));
+                        break;
+                    }
+                    case "focusedmon" : {
+                                var argv = args[1].split(",", 2);
+                                yield sync_monitors();
+                                focused_monitor = get_monitor_by_name(argv[0]);
+                                focused_workspace = get_workspace_by_name(argv[1]);
+                                break;
+                            }
+                            case "fullscreen" : {
+                                        yield sync_clients();
+                                        break;
+                                    }
+                                    case "monitorremoved" : {
+                                                var id = get_monitor_by_name(args[1]).id;
+                                                _monitors.get(id).removed();
+                                                _monitors.remove(id);
+                                                monitor_removed(id);
+                                                notify_property("monitors");
+                                                break;
+                                            }
+                                            case "monitoraddedv2" : {
+                                                        var id = int.parse(args[1].split(",", 2)[0]);
+                                                        var mon = new Monitor();
+                                                        _monitors.insert(id, mon);
+                                                        yield sync_monitors();
+                                                        monitor_added(mon);
+                                                        notify_property("monitors");
+                                                        break;
+                                                    }
+                                                    case "createworkspacev2" : {
+                                                                var id = int.parse(args[1].split(",", 2)[0]);
+                                                                var ws = new Workspace();
+                                                                _workspaces.insert(id, ws);
+                                                                yield sync_workspaces();
+                                                                workspace_added(ws);
+                                                                notify_property("workspaces");
+                                                                break;
+                                                            }
+                                                            case "destroyworkspacev2" : {
+                                                                        var id = int.parse(args[1].split(",", 2)[0]);
+                                                                        _workspaces.get(id).removed();
+                                                                        _workspaces.remove(id);
+                                                                        workspace_removed(id);
+                                                                        notify_property("workspaces");
+                                                                        break;
+                                                                    }
+                                                                    case "moveworkspacev2" : {
+                                                                                yield sync_workspaces();
+                                                                                yield sync_monitors();
+                                                                                focused_workspace = get_workspace(int.parse(args[1]));
+                                                                                notify_property("workspaces");
+                                                                                break;
+                                                                            }
+                                                                            case "renameworkspace" : {
+                                                                                        yield sync_workspaces();
+                                                                                        break;
+                                                                                    }
+                                                                                    case "activespecial": {
+                                                                                        yield sync_monitors();
+                                                                                        yield sync_workspaces();
+                                                                                        break;
+                                                                                    }
+                                                                                    case "activelayout": {
+                                                                                        var argv = args[1].split(",");
+                                                                                        keyboard_layout(argv[0], argv[1]);
+                                                                                        break;
+                                                                                    }
+                                                                                    // first event that signals a new client when it opens as an active window
+                                                                                    case "activewindowv2": {
+                                                                                        var previous_focused_group = focused_group;
+                                                                                        if (yield try_add_client(args[1])) yield sync_clients();
+                                                                                        focused_client = get_client(args[1]);
+                                                                                        if (previous_focused_group != focused_group) notify_property("focused-group");
+                                                                                        break;
+                                                                                    }
+                                                                                    case "openwindow": {
+                                                                                        var addr = args[1].split(",")[0];
+                                                                                        if (yield try_add_client(addr)) {
+                                                                                            yield sync_clients();
+                                                                                            yield sync_workspaces();
+                                                                                        }
+                                                                                        break;
+                                                                                    }
+                                                                                    case "closewindow": {
+                                                                                        var address = normalize_address(args[1]);
+                                                                                        var client = get_client(address);
+                                                                                        if (client != null) {
+                                                                                            if (client.group != null) client_removed_from_group(client, client.group);
+                                                                                            client.removed();
+                                                                                        }
+                                                                                        _clients.remove(address);
+                                                                                        yield sync_clients();
+                                                                                        yield sync_workspaces();
+                                                                                        client_removed(address);
+                                                                                        notify_property("clients");
+                                                                                        break;
+                                                                                    }
+                                                                                    case "movewindowv2": {
+                                                                                        yield sync_clients();
+                                                                                        yield sync_workspaces();
+                                                                                        var argv = args[1].split(",");
+                                                                                        client_moved(get_client(argv[0]), get_workspace(int.parse(argv[1])));
+                                                                                        get_client(argv[0]).moved_to(get_workspace(int.parse(argv[1])));
+                                                                                        break;
+                                                                                    }
+                                                                                    case "submap": {
+                                                                                        submap(args[1]);
+                                                                                        break;
+                                                                                    }
+                                                                                    case "changefloatingmode": {
+                                                                                        var argv = args[1].split(",");
+                                                                                        yield sync_clients();
+                                                                                        floating(get_client(argv[0]), argv[1] == "0");
+                                                                                        break;
+                                                                                    }
+                                                                                    case "urgent": {
+                                                                                        urgent(get_client(args[1]));
+                                                                                        break;
+                                                                                    }
+                                                                                    case "minimize": {
+                                                                                        var argv = args[1].split(",");
+                                                                                        yield sync_clients();
+                                                                                        minimize(get_client(argv[0]), argv[1] == "0");
+                                                                                        break;
+                                                                                    }
+                                                                                    case "windowtitlev2": {
+                                                                                        yield sync_clients();
+                                                                                        break;
+                                                                                    }
+                                                                                    case "togglegroup":
+                                                                                    case "moveintogroup":
+                                                                                    case "moveoutofgroup": {
+                                                                                        yield sync_groups();
+                                                                                        break;
+                                                                                    }
+                                                                                    case "ignoregrouplock": {
+                                                                                        ignoring_group_lock(args[1] == "1");
+                                                                                        break;
+                                                                                    }
+                                                                                    case "lockgroups": {
+                                                                                        locking_groups(args[1] == "1");
+                                                                                        break;
+                                                                                    }
+                                                                                    case "configreloaded": {
+                                                                                        sync_config_provider();
+                                                                                        config_reloaded();
+                                                                                        break;
+                                                                                    }
+                                                                                    default: break;
         }
 
         event(args[0], args[1]);

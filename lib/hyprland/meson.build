@@ -45,6 +45,7 @@ deps = [
 
 sources = [config] + files(
   'src/client.vala',
+  'src/group.vala',
   'src/hyprland.vala',
   'src/monitor.vala',
   'src/structs.vala',
@@ -80,6 +81,10 @@ if get_option('lib')
         'Hyprland.monitors',
         'Hyprland.workspaces',
         'Hyprland.clients',
+        'Hyprland.groups',
+        'Client.grouped',
+        'Group.clients',
+        'Workspace.groups',
       ),
       sources,
     ],
@@ -124,3 +129,23 @@ if get_option('cli')
     install: true,
   )
 endif
+
+test_exe = executable(
+  name + '-test',
+  ['tests/hyprland.vala', sources],
+  dependencies: deps,
+)
+
+python = find_program('python3')
+test(
+  'hyprland-ipc-lua',
+  python,
+  args: [files('tests/run.py'), test_exe, 'lua'],
+  timeout: 30,
+)
+test(
+  'hyprland-ipc-hyprlang',
+  python,
+  args: [files('tests/run.py'), test_exe, 'hyprlang'],
+  timeout: 30,
+)
